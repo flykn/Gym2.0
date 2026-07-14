@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#ff6b2b" />
+  <meta name="theme-color" content="#ff6b35" />
   <meta name="description" content="PWA приложение для отслеживания тренировок" />
 
   <link rel="manifest" href="manifest.json" />
@@ -60,61 +60,54 @@
       aria-labelledby="tabEquipment"
     >
 
-      <!-- ====================================================
+      <!-- ============================================
            БЛОК СТАТИСТИКИ
-           Размещается ВЫШЕ заголовка секции и списка тренажеров.
+           Размещается над списком тренажеров.
            Данные обновляются через StatsModule.update()
-           ==================================================== -->
-      <div class="stats-block" id="statsBlock">
+           при любом изменении записей дневника.
+           ============================================ -->
+      <div class="stats-section" id="statsSection">
+        <h2 class="stats-title">Моя статистика</h2>
 
-        <!-- Скелетон-лоадер показывается до загрузки данных -->
-        <div class="stats-loading" id="statsLoading">
-          <div class="skeleton-card"></div>
-          <div class="skeleton-card"></div>
-          <div class="skeleton-card"></div>
-        </div>
+        <div class="stats-grid">
 
-        <!-- Сами карточки статистики -->
-        <div class="stats-grid" id="statsGrid" hidden>
-
-          <!-- Карточка 1: Количество тренировок -->
+          <!-- Карточка: Количество тренировок -->
           <div class="stat-card" id="statWorkouts">
             <div class="stat-card__icon">🗓️</div>
             <div class="stat-card__body">
-              <div class="stat-card__value" id="statWorkoutsValue">0</div>
+              <div class="stat-card__value" id="statWorkoutsValue">
+                <!-- Значение вставляется через JS -->
+                <span class="stat-skeleton"></span>
+              </div>
               <div class="stat-card__label">Тренировок</div>
             </div>
-            <!-- Декоративная полоска акцентного цвета -->
-            <div class="stat-card__accent"></div>
           </div>
 
-          <!-- Карточка 2: Суммарный вес -->
+          <!-- Карточка: Суммарный вес -->
           <div class="stat-card" id="statWeight">
             <div class="stat-card__icon">⚖️</div>
             <div class="stat-card__body">
-              <!-- Значение разбито на число и единицу измерения -->
-              <div class="stat-card__value">
-                <span id="statWeightValue">0</span>
-                <span class="stat-card__unit">кг</span>
+              <div class="stat-card__value" id="statWeightValue">
+                <span class="stat-skeleton"></span>
               </div>
-              <div class="stat-card__label">Суммарный вес</div>
+              <div class="stat-card__label">Кг поднято</div>
             </div>
-            <div class="stat-card__accent"></div>
           </div>
 
-          <!-- Карточка 3: Количество упражнений -->
+          <!-- Карточка: Количество упражнений -->
           <div class="stat-card" id="statExercises">
             <div class="stat-card__icon">🔥</div>
             <div class="stat-card__body">
-              <div class="stat-card__value" id="statExercisesValue">0</div>
+              <div class="stat-card__value" id="statExercisesValue">
+                <span class="stat-skeleton"></span>
+              </div>
               <div class="stat-card__label">Упражнений</div>
             </div>
-            <div class="stat-card__accent"></div>
           </div>
 
         </div>
       </div>
-      <!-- /stats-block -->
+      <!-- /БЛОК СТАТИСТИКИ -->
 
       <!-- Заголовок секции тренажеров -->
       <div class="section-header">
@@ -157,6 +150,7 @@
               ></textarea>
             </div>
 
+            <!-- Фото: FileReader API → base64 → IndexedDB -->
             <div class="form-group">
               <label for="equipmentPhoto">Фото тренажера</label>
               <div class="photo-upload-area" id="photoUploadArea">
@@ -258,7 +252,7 @@
 
   </main>
 
-  <!-- ========== МОДАЛЬНОЕ ОКНО: ЗАПИСЬ В ДНЕВНИК ========== -->
+  <!-- ========== МОДАЛ: ЗАПИСЬ В ДНЕВНИК ========== -->
   <div class="modal-overlay" id="modalDiary" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalDiaryTitle">
       <div class="modal-header">
@@ -308,7 +302,7 @@
     </div>
   </div>
 
-  <!-- ========== МОДАЛЬНОЕ ОКНО: ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ========== -->
+  <!-- ========== МОДАЛ: ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ========== -->
   <div class="modal-overlay" id="modalConfirm" hidden>
     <div class="modal modal-sm" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
       <div class="modal-header">
@@ -322,7 +316,7 @@
     </div>
   </div>
 
-  <!-- ========== УВЕДОМЛЕНИЯ (TOAST) ========== -->
+  <!-- ========== TOAST-УВЕДОМЛЕНИЯ ========== -->
   <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
   <script src="script.js"></script>
