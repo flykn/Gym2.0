@@ -1,32 +1,10 @@
 /* ============================================================
-   GYM TRACKER — ГЛАВНЫЙ СКРИПТ
-   ============================================================
-
-   СТРУКТУРА ДАННЫХ (IndexedDB / localStorage):
-
-   Тренажеры (objectStore: "equipment"):
-   {
-     id:          "uuid-строка",
-     name:        "Жим лёжа",
-     description: "Описание упражнения...",
-     photo:       "data:image/jpeg;base64,...",  // base64 или null
-     createdAt:   "2024-01-15T10:30:00.000Z"
-   }
-
-   Записи дневника (objectStore: "diary"):
-   {
-     id:          "uuid-строка",
-     date:        "2024-01-15",               // YYYY-MM-DD
-     equipmentId: "uuid-тренажера",
-     sets: [
-       { weight: 80, reps: 10 },
-       { weight: 85, reps: 8  },
-       { weight: 90, reps: 6  }
-     ],
-     notes:       "Хорошая тренировка",
-     createdAt:   "2024-01-15T10:30:00.000Z"
-   }
-
+   GYM TRACKER — ПОЛНЫЙ СКРИПТ
+   Изменения относительно предыдущей версии:
+   [NEW]  StatsModule — подсчёт и отображение статистики
+   [MOD]  EquipmentModule.loadAndRender → вызывает StatsModule.update()
+   [MOD]  DiaryModule.loadAndRender    → вызывает StatsModule.update()
+   [MOD]  DB.getAllDiaryEntries        → новый метод для статистики
    ============================================================ */
 
 'use strict';
@@ -43,12 +21,10 @@ const STORE_DI   = 'diary';
 // УТИЛИТЫ
 // ============================================================
 
-/** Генерация уникального ID */
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2);
 }
 
-/** Форматирование даты для отображения */
 function formatDate(dateStr) {
   if (!dateStr) return '';
   const [y, m, d] = dateStr.split('-');
@@ -61,7 +37,6 @@ function formatDate(dateStr) {
   });
 }
 
-/** Получение текущей даты в формате YYYY-MM-DD */
 function getTodayString() {
   const now = new Date();
   const y = now.getFullYear();
@@ -70,24 +45,19 @@ function getTodayString() {
   return `${y}-${m}-${d}`;
 }
 
-/** Показ Toast-уведомления */
 function showToast(message, type = 'info', duration = 3000) {
   const container = document.getElementById('toastContainer');
   const icons = { success: '✅', error: '❌', info: 'ℹ️' };
-
   const toast = document.createElement('div');
   toast.className = `toast toast--${type}`;
   toast.innerHTML = `<span>${icons[type] || ''}</span><span>${message}</span>`;
-
   container.appendChild(toast);
-
   setTimeout(() => {
     toast.style.animation = 'toastOut 0.3s ease forwards';
     setTimeout(() => toast.remove(), 300);
   }, duration);
 }
 
-/** Экранирование HTML для безопасного вывода */
 function escapeHtml(str) {
   if (!str) return '';
   return str
@@ -98,20 +68,27 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
+/**
+ * Форматирование большого числа для отображения в статистике.
+ * Например: 1500 → "1 500", 1200000 → "1 200 000"
+ */
+function formatStatNumber(num) {
+  if (num === null || num === undefined) return '0';
+  return Math.round(num).toLocaleString('ru-RU');
+}
+
 // ============================================================
 // СЛОЙ РАБОТЫ С IndexedDB
 // ============================================================
 const DB = (() => {
   let db = null;
 
-  /** Открытие / инициализация базы данных */
   function open() {
     return new Promise((resolve, reject) => {
       if (db) { resolve(db); return; }
 
       const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-      // Создание хранилищ при первом запуске или обновлении версии
       request.onupgradeneeded = (event) => {
         const database = event.target.result;
 
@@ -139,12 +116,10 @@ const DB = (() => {
     });
   }
 
-  /** Выполнение транзакции */
   function transaction(storeName, mode = 'readonly') {
     return db.transaction(storeName, mode).objectStore(storeName);
   }
 
-  /** Обёртка промиса над IDBRequest */
   function promisify(request) {
     return new Promise((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
@@ -152,71 +127,69 @@ const DB = (() => {
     });
   }
 
-  // --- CRUD для тренажеров ---
+  // --- CRUD: Тренажеры ---
 
   async function getAllEquipment() {
     await open();
     const store = transaction(STORE_EQ, 'readonly');
     const items = await promisify(store.getAll());
-    // Сортировка по дате создания (новые сначала)
     return items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
 
   async function getEquipmentById(id) {
     await open();
-    const store = transaction(STORE_EQ, 'readonly');
-    return promisify(store.get(id));
+    return promisify(transaction(STORE_EQ, 'readonly').get(id));
   }
 
   async function saveEquipment(item) {
     await open();
-    const store = transaction(STORE_EQ, 'readwrite');
-    return promisify(store.put(item));
+    return promisify(transaction(STORE_EQ, 'readwrite').put(item));
   }
 
   async function deleteEquipment(id) {
     await open();
-    // Удаляем тренажер
-    const eqStore = transaction(STORE_EQ, 'readwrite');
-    await promisify(eqStore.delete(id));
+    await promisify(transaction(STORE_EQ, 'readwrite').delete(id));
 
-    // Каскадно удаляем все записи дневника с этим тренажером
-    const diStore = transaction(STORE_DI, 'readwrite');
-    const allDiary = await promisify(diStore.getAll());
-    const toDelete = allDiary.filter(e => e.equipmentId === id);
-    for (const entry of toDelete) {
+    // Каскадное удаление записей дневника
+    const allDiary = await getAllDiaryEntries();
+    for (const entry of allDiary.filter(e => e.equipmentId === id)) {
       await promisify(
         db.transaction(STORE_DI, 'readwrite').objectStore(STORE_DI).delete(entry.id)
       );
     }
   }
 
-  // --- CRUD для дневника ---
+  // --- CRUD: Дневник ---
 
   async function getDiaryByDate(date) {
     await open();
     const store = transaction(STORE_DI, 'readonly');
-    const index = store.index('date');
-    const items = await promisify(index.getAll(date));
+    const items = await promisify(store.index('date').getAll(date));
     return items.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
   }
 
   async function getDiaryEntryById(id) {
     await open();
-    const store = transaction(STORE_DI, 'readonly');
-    return promisify(store.get(id));
+    return promisify(transaction(STORE_DI, 'readonly').get(id));
+  }
+
+  /**
+   * [NEW] Получение ВСЕХ записей дневника — нужно для подсчёта статистики.
+   * Используется только в StatsModule, не влияет на остальную логику.
+   */
+  async function getAllDiaryEntries() {
+    await open();
+    return promisify(transaction(STORE_DI, 'readonly').getAll());
   }
 
   async function saveDiaryEntry(entry) {
     await open();
-    const store = transaction(STORE_DI, 'readwrite');
-    return promisify(store.put(entry));
+    return promisify(transaction(STORE_DI, 'readwrite').put(entry));
   }
 
   async function deleteDiaryEntry(id) {
     await open();
-    const store = transaction(STORE_DI, 'readwrite');
-    return promisify(store.delete(id));
+    return promisify(transaction(STORE_DI, 'readwrite').delete(id));
   }
 
   return {
@@ -226,6 +199,7 @@ const DB = (() => {
     deleteEquipment,
     getDiaryByDate,
     getDiaryEntryById,
+    getAllDiaryEntries,   // [NEW]
     saveDiaryEntry,
     deleteDiaryEntry
   };
@@ -235,20 +209,164 @@ const DB = (() => {
 // СОСТОЯНИЕ ПРИЛОЖЕНИЯ
 // ============================================================
 const AppState = {
-  equipment:       [],    // Кэш тренажеров
-  currentDate:     null,  // Выбранная дата в дневнике
-  diaryEntries:    [],    // Записи за выбранную дату
-  editingEquipId:  null,  // ID редактируемого тренажера
-  editingDiaryId:  null,  // ID редактируемой записи
-  photoBase64:     null,  // Текущее фото в форме (base64)
-  confirmCallback: null   // Коллбэк для модала подтверждения
+  equipment:       [],
+  currentDate:     null,
+  diaryEntries:    [],
+  editingEquipId:  null,
+  editingDiaryId:  null,
+  photoBase64:     null,
+  confirmCallback: null
 };
+
+// ============================================================
+// [NEW] МОДУЛЬ СТАТИСТИКИ
+// ============================================================
+const StatsModule = (() => {
+
+  // DOM-элементы
+  const loadingEl        = document.getElementById('statsLoading');
+  const gridEl           = document.getElementById('statsGrid');
+  const workoutsValueEl  = document.getElementById('statWorkoutsValue');
+  const weightValueEl    = document.getElementById('statWeightValue');
+  const exercisesValueEl = document.getElementById('statExercisesValue');
+
+  /**
+   * Анимация изменения числа (плавный счётчик).
+   * @param {HTMLElement} el   - элемент для обновления
+   * @param {number}      from - начальное значение
+   * @param {number}      to   - конечное значение
+   * @param {number}      ms   - длительность анимации в мс
+   */
+  function animateCounter(el, from, to, ms = 600) {
+    if (from === to) return;
+
+    const startTime = performance.now();
+    const diff = to - from;
+
+    function step(currentTime) {
+      const elapsed  = currentTime - startTime;
+      const progress = Math.min(elapsed / ms, 1);
+
+      // Функция плавности: easeOutCubic
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const current = Math.round(from + diff * eased);
+
+      el.textContent = formatStatNumber(current);
+
+      if (progress < 1) {
+        requestAnimationFrame(step);
+      } else {
+        el.textContent = formatStatNumber(to);
+        // Добавляем CSS-класс для "прыжка" числа при обновлении
+        el.closest('.stat-card__value')?.classList.add('updated');
+        setTimeout(() => {
+          el.closest('.stat-card__value')?.classList.remove('updated');
+        }, 400);
+      }
+    }
+
+    requestAnimationFrame(step);
+  }
+
+  /**
+   * Подсчёт статистики из всех записей дневника.
+   *
+   * Алгоритм:
+   * 1. Получаем все записи дневника из IndexedDB
+   * 2. Уникальные даты → количество тренировок
+   * 3. Сумма (вес * повторения) по всем подходам → суммарный вес
+   * 4. Количество записей (строк дневника) → количество упражнений
+   *
+   * @returns {Promise<{workouts: number, totalWeight: number, exercises: number}>}
+   */
+  async function calculate() {
+    const allEntries = await DB.getAllDiaryEntries();
+
+    if (allEntries.length === 0) {
+      return { workouts: 0, totalWeight: 0, exercises: 0 };
+    }
+
+    // 1. Уникальные даты = количество дней с тренировками
+    const uniqueDates = new Set(allEntries.map(e => e.date));
+    const workouts = uniqueDates.size;
+
+    // 2. Суммарный вес: Σ (вес × повторения) по каждому подходу
+    let totalWeight = 0;
+    allEntries.forEach(entry => {
+      if (Array.isArray(entry.sets)) {
+        entry.sets.forEach(set => {
+          const w = parseFloat(set.weight) || 0;
+          const r = parseInt(set.reps)    || 0;
+          totalWeight += w * r;
+        });
+      }
+    });
+
+    // 3. Количество упражнений = общее число записей в дневнике
+    const exercises = allEntries.length;
+
+    return { workouts, totalWeight, exercises };
+  }
+
+  /**
+   * Предыдущие значения для анимации счётчика.
+   * Хранятся между вызовами update().
+   */
+  const prevValues = {
+    workouts:    0,
+    totalWeight: 0,
+    exercises:   0
+  };
+
+  /**
+   * [ПУБЛИЧНЫЙ] Обновление блока статистики.
+   * Вызывается после любого изменения данных дневника.
+   *
+   * Точки вызова в коде:
+   * - EquipmentModule: после deleteEquipment (каскадное удаление)
+   * - DiaryModule: после saveDiaryEntry и deleteDiaryEntry
+   * - initApp: при первом запуске
+   */
+  async function update() {
+    try {
+      // Показываем скелетон при первой загрузке
+      if (gridEl.hidden) {
+        loadingEl.hidden = false;
+        gridEl.hidden    = true;
+      }
+
+      const stats = await calculate();
+
+      // Анимируем изменение каждого показателя
+      animateCounter(workoutsValueEl,  prevValues.workouts,    stats.workouts,    700);
+      animateCounter(weightValueEl,    prevValues.totalWeight, stats.totalWeight, 900);
+      animateCounter(exercisesValueEl, prevValues.exercises,   stats.exercises,   700);
+
+      // Сохраняем для следующей анимации
+      prevValues.workouts    = stats.workouts;
+      prevValues.totalWeight = stats.totalWeight;
+      prevValues.exercises   = stats.exercises;
+
+      // Скрываем скелетон, показываем данные
+      loadingEl.hidden = true;
+      gridEl.hidden    = false;
+
+    } catch (err) {
+      console.error('[Stats] Ошибка подсчёта статистики:', err);
+      // При ошибке всё равно показываем блок с нулями
+      loadingEl.hidden = true;
+      gridEl.hidden    = false;
+    }
+  }
+
+  return { update };
+})();
 
 // ============================================================
 // НАВИГАЦИЯ ПО ТАБАМ
 // ============================================================
 function initTabs() {
-  const buttons = document.querySelectorAll('.tab-btn');
+  const buttons  = document.querySelectorAll('.tab-btn');
   const sections = document.querySelectorAll('.tab-section');
 
   buttons.forEach(btn => {
@@ -268,11 +386,16 @@ function initTabs() {
       btn.classList.add('active');
       btn.setAttribute('aria-selected', 'true');
 
-      const targetSection = document.getElementById(
-        targetTab === 'equipment' ? 'sectionEquipment' : 'sectionDiary'
-      );
-      targetSection.hidden = false;
-      targetSection.classList.add('active');
+      const sectionId = targetTab === 'equipment' ? 'sectionEquipment' : 'sectionDiary';
+      const target = document.getElementById(sectionId);
+      target.hidden = false;
+      target.classList.add('active');
+
+      // При переключении на вкладку тренажеров — обновляем статистику
+      // (на случай если данные изменились в дневнике)
+      if (targetTab === 'equipment') {
+        StatsModule.update();
+      }
     });
   });
 }
@@ -282,22 +405,20 @@ function initTabs() {
 // ============================================================
 const EquipmentModule = (() => {
 
-  // --- DOM-элементы ---
-  const modal          = document.getElementById('modalEquipment');
-  const form           = document.getElementById('formEquipment');
-  const modalTitle     = document.getElementById('modalEquipmentTitle');
-  const inputId        = document.getElementById('equipmentId');
-  const inputName      = document.getElementById('equipmentName');
-  const inputDesc      = document.getElementById('equipmentDesc');
-  const inputPhoto     = document.getElementById('equipmentPhoto');
-  const photoPreview   = document.getElementById('photoPreview');
+  const modal            = document.getElementById('modalEquipment');
+  const form             = document.getElementById('formEquipment');
+  const modalTitle       = document.getElementById('modalEquipmentTitle');
+  const inputId          = document.getElementById('equipmentId');
+  const inputName        = document.getElementById('equipmentName');
+  const inputDesc        = document.getElementById('equipmentDesc');
+  const inputPhoto       = document.getElementById('equipmentPhoto');
+  const photoPreview     = document.getElementById('photoPreview');
   const photoPlaceholder = document.getElementById('photoPlaceholder');
-  const btnRemovePhoto = document.getElementById('btnRemovePhoto');
-  const listEl         = document.getElementById('equipmentList');
-  const emptyEl        = document.getElementById('emptyEquipment');
-  const errorName      = document.getElementById('errorEquipmentName');
+  const btnRemovePhoto   = document.getElementById('btnRemovePhoto');
+  const listEl           = document.getElementById('equipmentList');
+  const emptyEl          = document.getElementById('emptyEquipment');
+  const errorName        = document.getElementById('errorEquipmentName');
 
-  /** Открытие модала добавления */
   function openAddModal() {
     AppState.editingEquipId = null;
     AppState.photoBase64    = null;
@@ -309,7 +430,6 @@ const EquipmentModule = (() => {
     inputName.focus();
   }
 
-  /** Открытие модала редактирования */
   async function openEditModal(id) {
     const item = await DB.getEquipmentById(id);
     if (!item) return;
@@ -317,23 +437,18 @@ const EquipmentModule = (() => {
     AppState.editingEquipId = id;
     AppState.photoBase64    = item.photo || null;
     modalTitle.textContent  = 'Редактировать тренажер';
-
     inputId.value   = item.id;
     inputName.value = item.name;
     inputDesc.value = item.description || '';
 
-    if (item.photo) {
-      showPhotoPreview(item.photo);
-    } else {
-      resetPhotoUI();
-    }
+    if (item.photo) showPhotoPreview(item.photo);
+    else resetPhotoUI();
 
     clearErrors();
     modal.hidden = false;
     inputName.focus();
   }
 
-  /** Закрытие модала */
   function closeModal() {
     modal.hidden = true;
     form.reset();
@@ -342,15 +457,13 @@ const EquipmentModule = (() => {
     AppState.photoBase64    = null;
   }
 
-  /** Показ превью фото */
   function showPhotoPreview(src) {
-    photoPreview.src    = src;
-    photoPreview.hidden = false;
+    photoPreview.src        = src;
+    photoPreview.hidden     = false;
     photoPlaceholder.hidden = true;
     btnRemovePhoto.hidden   = false;
   }
 
-  /** Сброс UI фото */
   function resetPhotoUI() {
     photoPreview.src        = '';
     photoPreview.hidden     = true;
@@ -359,47 +472,38 @@ const EquipmentModule = (() => {
     inputPhoto.value        = '';
   }
 
-  /** Очистка ошибок валидации */
   function clearErrors() {
-    errorName.textContent = '';
+    errorName.textContent       = '';
     inputName.style.borderColor = '';
   }
 
-  /** Валидация формы */
   function validate() {
     let valid = true;
     clearErrors();
-
     if (!inputName.value.trim()) {
-      errorName.textContent = 'Введите название тренажера';
+      errorName.textContent       = 'Введите название тренажера';
       inputName.style.borderColor = 'var(--color-danger)';
       inputName.focus();
       valid = false;
     }
-
     return valid;
   }
 
-  /** Обработка выбора файла */
   function handleFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Проверка типа файла
     if (!file.type.startsWith('image/')) {
       showToast('Выберите файл изображения', 'error');
       return;
     }
-
-    // Ограничение размера: 5 МБ
     if (file.size > 5 * 1024 * 1024) {
       showToast('Файл слишком большой (максимум 5 МБ)', 'error');
       return;
     }
 
-    // Чтение файла как base64 через FileReader API
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload  = (e) => {
       AppState.photoBase64 = e.target.result;
       showPhotoPreview(e.target.result);
     };
@@ -407,19 +511,20 @@ const EquipmentModule = (() => {
     reader.readAsDataURL(file);
   }
 
-  /** Сохранение тренажера */
   async function handleSubmit(event) {
     event.preventDefault();
     if (!validate()) return;
+
+    const existing = AppState.editingEquipId
+      ? await DB.getEquipmentById(AppState.editingEquipId)
+      : null;
 
     const item = {
       id:          AppState.editingEquipId || generateId(),
       name:        inputName.value.trim(),
       description: inputDesc.value.trim(),
       photo:       AppState.photoBase64 || null,
-      createdAt:   AppState.editingEquipId
-                     ? (await DB.getEquipmentById(AppState.editingEquipId))?.createdAt
-                     : new Date().toISOString()
+      createdAt:   existing?.createdAt || new Date().toISOString()
     };
 
     try {
@@ -436,7 +541,6 @@ const EquipmentModule = (() => {
     }
   }
 
-  /** Удаление тренажера с подтверждением */
   async function handleDelete(id) {
     const item = AppState.equipment.find(e => e.id === id);
     if (!item) return;
@@ -448,10 +552,13 @@ const EquipmentModule = (() => {
           await DB.deleteEquipment(id);
           await loadAndRender();
 
-          // Обновляем дневник, если открыт
           if (AppState.currentDate) {
             await DiaryModule.loadAndRender(AppState.currentDate);
           }
+
+          // [MOD] Обновляем статистику после удаления тренажера
+          // (каскадно удалились записи дневника → статистика изменилась)
+          await StatsModule.update();
 
           showToast('Тренажер удалён', 'success');
         } catch (err) {
@@ -462,7 +569,6 @@ const EquipmentModule = (() => {
     );
   }
 
-  /** Загрузка данных и рендер списка */
   async function loadAndRender() {
     try {
       AppState.equipment = await DB.getAllEquipment();
@@ -473,7 +579,6 @@ const EquipmentModule = (() => {
     }
   }
 
-  /** Рендер списка тренажеров */
   function renderList() {
     listEl.innerHTML = '';
 
@@ -483,14 +588,9 @@ const EquipmentModule = (() => {
     }
 
     emptyEl.hidden = true;
-
-    AppState.equipment.forEach(item => {
-      const card = createCard(item);
-      listEl.appendChild(card);
-    });
+    AppState.equipment.forEach(item => listEl.appendChild(createCard(item)));
   }
 
-  /** Создание DOM-карточки тренажера */
   function createCard(item) {
     const card = document.createElement('div');
     card.className = 'equipment-card';
@@ -501,12 +601,12 @@ const EquipmentModule = (() => {
       : `<span class="equipment-card__img-placeholder">🏋️</span>`;
 
     card.innerHTML = `
-      <div class="equipment-card__img-wrap">
-        ${imgHtml}
-      </div>
+      <div class="equipment-card__img-wrap">${imgHtml}</div>
       <div class="equipment-card__body">
         <div class="equipment-card__name">${escapeHtml(item.name)}</div>
-        <div class="equipment-card__desc">${escapeHtml(item.description) || '<em style="opacity:.5">Без описания</em>'}</div>
+        <div class="equipment-card__desc">
+          ${escapeHtml(item.description) || '<em style="opacity:.5">Без описания</em>'}
+        </div>
       </div>
       <div class="equipment-card__actions">
         <button class="btn btn-secondary btn-sm btn-edit" data-id="${item.id}">
@@ -518,41 +618,27 @@ const EquipmentModule = (() => {
       </div>
     `;
 
-    // Обработчики кнопок карточки
     card.querySelector('.btn-edit').addEventListener('click', () => openEditModal(item.id));
     card.querySelector('.btn-delete').addEventListener('click', () => handleDelete(item.id));
 
     return card;
   }
 
-  /** Инициализация модуля */
   function init() {
-    // Кнопки открытия модала
     document.getElementById('btnAddEquipment').addEventListener('click', openAddModal);
     document.getElementById('btnAddEquipmentEmpty').addEventListener('click', openAddModal);
-
-    // Закрытие модала
     document.getElementById('btnCloseEquipmentModal').addEventListener('click', closeModal);
     document.getElementById('btnCancelEquipment').addEventListener('click', closeModal);
 
-    // Клик по оверлею — закрытие
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) closeModal();
-    });
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 
-    // Отправка формы
     form.addEventListener('submit', handleSubmit);
-
-    // Выбор фото
     inputPhoto.addEventListener('change', handleFileSelect);
-
-    // Удаление фото
     btnRemovePhoto.addEventListener('click', () => {
       AppState.photoBase64 = null;
       resetPhotoUI();
     });
 
-    // Загрузка данных при старте
     loadAndRender();
   }
 
@@ -564,7 +650,6 @@ const EquipmentModule = (() => {
 // ============================================================
 const DiaryModule = (() => {
 
-  // --- DOM-элементы ---
   const dateInput      = document.getElementById('diaryDate');
   const dayHeader      = document.getElementById('diaryDayHeader');
   const dayTitle       = document.getElementById('diaryDayTitle');
@@ -585,7 +670,6 @@ const DiaryModule = (() => {
 
   // --- Управление подходами ---
 
-  /** Добавление строки подхода */
   function addSetRow(weight = '', reps = '') {
     setsCount++;
     const row = document.createElement('div');
@@ -599,9 +683,7 @@ const DiaryModule = (() => {
         class="set-weight"
         placeholder="Вес (кг)"
         value="${weight}"
-        min="0"
-        max="9999"
-        step="0.5"
+        min="0" max="9999" step="0.5"
         aria-label="Вес подхода ${setsCount}"
       />
       <input
@@ -609,9 +691,7 @@ const DiaryModule = (() => {
         class="set-reps"
         placeholder="Повторений"
         value="${reps}"
-        min="1"
-        max="9999"
-        step="1"
+        min="1" max="9999" step="1"
         aria-label="Повторений в подходе ${setsCount}"
       />
       <button type="button" class="btn-icon btn-remove-set" aria-label="Удалить подход">✕</button>
@@ -625,35 +705,24 @@ const DiaryModule = (() => {
     setsList.appendChild(row);
   }
 
-  /** Перенумерация подходов после удаления */
   function renumberSets() {
-    const rows = setsList.querySelectorAll('.set-row');
-    rows.forEach((row, idx) => {
+    setsList.querySelectorAll('.set-row').forEach((row, idx) => {
       row.querySelector('.set-row__num').textContent = idx + 1;
     });
-    setsCount = rows.length;
+    setsCount = setsList.querySelectorAll('.set-row').length;
   }
 
-  /** Получение данных подходов из формы */
   function getSetsData() {
-    const rows = setsList.querySelectorAll('.set-row');
-    const sets = [];
-
-    rows.forEach(row => {
-      const weight = parseFloat(row.querySelector('.set-weight').value) || 0;
-      const reps   = parseInt(row.querySelector('.set-reps').value)    || 0;
-      sets.push({ weight, reps });
-    });
-
-    return sets;
+    return Array.from(setsList.querySelectorAll('.set-row')).map(row => ({
+      weight: parseFloat(row.querySelector('.set-weight').value) || 0,
+      reps:   parseInt(row.querySelector('.set-reps').value)    || 0
+    }));
   }
 
   // --- Модал ---
 
-  /** Заполнение select тренажеров */
   function populateEquipmentSelect(selectedId = '') {
     selectEquip.innerHTML = '<option value="">— Выберите тренажер —</option>';
-
     AppState.equipment.forEach(item => {
       const opt = document.createElement('option');
       opt.value = item.id;
@@ -663,7 +732,6 @@ const DiaryModule = (() => {
     });
   }
 
-  /** Открытие модала добавления записи */
   function openAddModal(date) {
     AppState.editingDiaryId = null;
     modalTitle.textContent  = 'Добавить запись';
@@ -673,34 +741,26 @@ const DiaryModule = (() => {
     inputEntryDate.value = date;
     populateEquipmentSelect();
     clearErrors();
-
-    // По умолчанию — 3 подхода
-    addSetRow();
-    addSetRow();
-    addSetRow();
-
+    addSetRow(); addSetRow(); addSetRow();
     modal.hidden = false;
     selectEquip.focus();
   }
 
-  /** Открытие модала редактирования записи */
   async function openEditModal(id) {
     const entry = await DB.getDiaryEntryById(id);
     if (!entry) return;
 
     AppState.editingDiaryId = id;
     modalTitle.textContent  = 'Редактировать запись';
-
     inputEntryId.value   = entry.id;
     inputEntryDate.value = entry.date;
     inputNotes.value     = entry.notes || '';
-
     populateEquipmentSelect(entry.equipmentId);
 
     setsList.innerHTML = '';
     setsCount = 0;
 
-    if (entry.sets && entry.sets.length > 0) {
+    if (entry.sets?.length > 0) {
       entry.sets.forEach(s => addSetRow(s.weight, s.reps));
     } else {
       addSetRow();
@@ -710,7 +770,6 @@ const DiaryModule = (() => {
     modal.hidden = false;
   }
 
-  /** Закрытие модала */
   function closeModal() {
     modal.hidden = true;
     form.reset();
@@ -719,49 +778,48 @@ const DiaryModule = (() => {
     AppState.editingDiaryId = null;
   }
 
-  /** Очистка ошибок */
   function clearErrors() {
-    errorEquip.textContent = '';
+    errorEquip.textContent        = '';
     selectEquip.style.borderColor = '';
   }
 
-  /** Валидация формы дневника */
   function validate() {
     let valid = true;
     clearErrors();
-
     if (!selectEquip.value) {
-      errorEquip.textContent = 'Выберите тренажер';
+      errorEquip.textContent        = 'Выберите тренажер';
       selectEquip.style.borderColor = 'var(--color-danger)';
       selectEquip.focus();
       valid = false;
     }
-
     return valid;
   }
 
-  /** Сохранение записи */
   async function handleSubmit(event) {
     event.preventDefault();
     if (!validate()) return;
 
-    const sets = getSetsData();
     const date = inputEntryDate.value || AppState.currentDate;
+    const existing = AppState.editingDiaryId
+      ? await DB.getDiaryEntryById(AppState.editingDiaryId)
+      : null;
 
     const entry = {
       id:          AppState.editingDiaryId || generateId(),
       date:        date,
       equipmentId: selectEquip.value,
-      sets:        sets,
+      sets:        getSetsData(),
       notes:       inputNotes.value.trim(),
-      createdAt:   AppState.editingDiaryId
-                     ? (await DB.getDiaryEntryById(AppState.editingDiaryId))?.createdAt
-                     : new Date().toISOString()
+      createdAt:   existing?.createdAt || new Date().toISOString()
     };
 
     try {
       await DB.saveDiaryEntry(entry);
       await loadAndRender(date);
+
+      // [MOD] Обновляем статистику после сохранения записи дневника
+      await StatsModule.update();
+
       closeModal();
       showToast(
         AppState.editingDiaryId ? 'Запись обновлена' : 'Запись добавлена',
@@ -773,7 +831,6 @@ const DiaryModule = (() => {
     }
   }
 
-  /** Удаление записи с подтверждением */
   async function handleDelete(id) {
     const entry = AppState.diaryEntries.find(e => e.id === id);
     const equip = AppState.equipment.find(e => e.id === entry?.equipmentId);
@@ -785,6 +842,10 @@ const DiaryModule = (() => {
         try {
           await DB.deleteDiaryEntry(id);
           await loadAndRender(AppState.currentDate);
+
+          // [MOD] Обновляем статистику после удаления записи дневника
+          await StatsModule.update();
+
           showToast('Запись удалена', 'success');
         } catch (err) {
           console.error('[Diary] Ошибка удаления:', err);
@@ -794,10 +855,9 @@ const DiaryModule = (() => {
     );
   }
 
-  /** Загрузка и рендер записей за дату */
   async function loadAndRender(date) {
     if (!date) return;
-    AppState.currentDate  = date;
+    AppState.currentDate = date;
 
     try {
       AppState.diaryEntries = await DB.getDiaryByDate(date);
@@ -808,11 +868,10 @@ const DiaryModule = (() => {
     }
   }
 
-  /** Рендер записей */
   function renderEntries() {
-    entryList.innerHTML = '';
-    diaryHint.hidden    = true;
-    dayHeader.hidden    = false;
+    entryList.innerHTML  = '';
+    diaryHint.hidden     = true;
+    dayHeader.hidden     = false;
     dayTitle.textContent = formatDate(AppState.currentDate);
 
     if (AppState.diaryEntries.length === 0) {
@@ -821,27 +880,22 @@ const DiaryModule = (() => {
     }
 
     emptyDiary.hidden = true;
-
     AppState.diaryEntries.forEach(entry => {
       const equip = AppState.equipment.find(e => e.id === entry.equipmentId);
-      const card  = createEntryCard(entry, equip);
-      entryList.appendChild(card);
+      entryList.appendChild(createEntryCard(entry, equip));
     });
   }
 
-  /** Создание карточки записи дневника */
   function createEntryCard(entry, equip) {
     const card = document.createElement('div');
     card.className = 'diary-entry-card';
 
-    // Миниатюра тренажера
     const thumbHtml = equip?.photo
-      ? `<img class="diary-entry-card__thumb" src="${equip.photo}" alt="${escapeHtml(equip?.name)}" loading="lazy" />`
+      ? `<img class="diary-entry-card__thumb" src="${equip.photo}" alt="${escapeHtml(equip.name)}" loading="lazy" />`
       : `<div class="diary-entry-card__thumb-placeholder">🏋️</div>`;
 
-    // Таблица подходов
     let setsHtml = '';
-    if (entry.sets && entry.sets.length > 0) {
+    if (entry.sets?.length > 0) {
       const rows = entry.sets.map((s, i) => `
         <tr>
           <td class="set-number">${i + 1}</td>
@@ -849,15 +903,10 @@ const DiaryModule = (() => {
           <td>${s.reps > 0 ? `${s.reps} повт.` : '—'}</td>
         </tr>
       `).join('');
-
       setsHtml = `
         <table class="sets-table">
           <thead>
-            <tr>
-              <th>#</th>
-              <th>Вес</th>
-              <th>Повторения</th>
-            </tr>
+            <tr><th>#</th><th>Вес</th><th>Повторения</th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>
@@ -866,7 +915,6 @@ const DiaryModule = (() => {
       setsHtml = '<p style="color:var(--color-text-muted);font-size:.85rem">Подходы не указаны</p>';
     }
 
-    // Заметки
     const notesHtml = entry.notes
       ? `<div class="diary-entry-card__notes">💬 ${escapeHtml(entry.notes)}</div>`
       : '';
@@ -874,7 +922,9 @@ const DiaryModule = (() => {
     card.innerHTML = `
       <div class="diary-entry-card__header">
         ${thumbHtml}
-        <span class="diary-entry-card__name">${escapeHtml(equip?.name || 'Тренажер удалён')}</span>
+        <span class="diary-entry-card__name">
+          ${escapeHtml(equip?.name || 'Тренажер удалён')}
+        </span>
         <div class="diary-entry-card__actions">
           <button class="btn-icon btn-edit-entry" data-id="${entry.id}" title="Редактировать">✏️</button>
           <button class="btn-icon btn-delete-entry" data-id="${entry.id}" title="Удалить">🗑</button>
@@ -892,18 +942,13 @@ const DiaryModule = (() => {
     return card;
   }
 
-  /** Инициализация модуля */
   function init() {
-    // Установка сегодняшней даты по умолчанию
     dateInput.value = getTodayString();
 
-    // Изменение даты
     dateInput.addEventListener('change', () => {
-      const date = dateInput.value;
-      if (date) loadAndRender(date);
+      if (dateInput.value) loadAndRender(dateInput.value);
     });
 
-    // Кнопка добавления записи
     document.getElementById('btnAddDiaryEntry').addEventListener('click', () => {
       if (AppState.equipment.length === 0) {
         showToast('Сначала добавьте тренажеры в раздел «Тренажеры»', 'info');
@@ -912,18 +957,12 @@ const DiaryModule = (() => {
       openAddModal(AppState.currentDate);
     });
 
-    // Добавление подхода
     document.getElementById('btnAddSet').addEventListener('click', () => addSetRow());
-
-    // Закрытие модала
     document.getElementById('btnCloseDiaryModal').addEventListener('click', closeModal);
     document.getElementById('btnCancelDiary').addEventListener('click', closeModal);
 
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) closeModal();
-    });
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 
-    // Отправка формы
     form.addEventListener('submit', handleSubmit);
   }
 
@@ -931,12 +970,12 @@ const DiaryModule = (() => {
 })();
 
 // ============================================================
-// МОДУЛЬ: МОДАЛ ПОДТВЕРЖДЕНИЯ УДАЛЕНИЯ
+// МОДУЛЬ: ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ
 // ============================================================
 const ConfirmModal = (() => {
-  const modal   = document.getElementById('modalConfirm');
-  const message = document.getElementById('confirmMessage');
-  const btnOk   = document.getElementById('btnConfirmOk');
+  const modal     = document.getElementById('modalConfirm');
+  const message   = document.getElementById('confirmMessage');
+  const btnOk     = document.getElementById('btnConfirmOk');
   const btnCancel = document.getElementById('btnConfirmCancel');
 
   function show(text, onConfirm) {
@@ -959,12 +998,7 @@ const ConfirmModal = (() => {
     });
 
     btnCancel.addEventListener('click', hide);
-
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) hide();
-    });
-
-    // Закрытие по Escape
+    modal.addEventListener('click', (e) => { if (e.target === modal) hide(); });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && !modal.hidden) hide();
     });
@@ -981,12 +1015,8 @@ function registerServiceWorker() {
     window.addEventListener('load', () => {
       navigator.serviceWorker
         .register('/sw.js')
-        .then((reg) => {
-          console.log('[SW] Зарегистрирован:', reg.scope);
-        })
-        .catch((err) => {
-          console.warn('[SW] Ошибка регистрации:', err);
-        });
+        .then(reg => console.log('[SW] Зарегистрирован:', reg.scope))
+        .catch(err => console.warn('[SW] Ошибка регистрации:', err));
     });
   }
 }
@@ -998,12 +1028,10 @@ function initNetworkStatus() {
   const statusEl = document.getElementById('pwaStatus');
 
   function update() {
-    statusEl.textContent = navigator.onLine ? '🟢' : '🔴';
-    statusEl.title       = navigator.onLine ? 'Онлайн' : 'Офлайн';
-
-    if (!navigator.onLine) {
-      showToast('Нет подключения к интернету. Работаем офлайн.', 'info');
-    }
+    const online = navigator.onLine;
+    statusEl.textContent = online ? '🟢' : '🔴';
+    statusEl.title       = online ? 'Онлайн' : 'Офлайн';
+    if (!online) showToast('Нет подключения. Работаем офлайн.', 'info');
   }
 
   window.addEventListener('online',  update);
@@ -1016,19 +1044,19 @@ function initNetworkStatus() {
 // ============================================================
 async function initApp() {
   try {
-    // Инициализация модулей
     initTabs();
     ConfirmModal.init();
     EquipmentModule.init();
     DiaryModule.init();
-
-    // PWA
     registerServiceWorker();
     initNetworkStatus();
 
-    // Загрузка дневника за сегодня при старте
+    // Загружаем дневник за сегодня
     const today = getTodayString();
     await DiaryModule.loadAndRender(today);
+
+    // [NEW] Первичная загрузка статистики
+    await StatsModule.update();
 
     console.log('[App] Gym Tracker запущен ✅');
   } catch (err) {
@@ -1037,5 +1065,4 @@ async function initApp() {
   }
 }
 
-// Запуск после загрузки DOM
 document.addEventListener('DOMContentLoaded', initApp);
