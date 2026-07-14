@@ -1,10 +1,32 @@
 /* ============================================================
    GYM TRACKER — ПОЛНЫЙ СКРИПТ
-   Изменения относительно предыдущей версии:
-   [NEW]  StatsModule — подсчёт и отображение статистики
-   [MOD]  EquipmentModule.loadAndRender → вызывает StatsModule.update()
-   [MOD]  DiaryModule.loadAndRender    → вызывает StatsModule.update()
-   [MOD]  DB.getAllDiaryEntries        → новый метод для статистики
+   Включает: DB, StatsModule, EquipmentModule, DiaryModule,
+             ConfirmModal, PWA, Toast, Network Status
+   ============================================================
+
+   СТРУКТУРА ДАННЫХ IndexedDB:
+
+   ObjectStore "equipment":
+   {
+     id:          "uuid",
+     name:        "Жим лёжа",
+     description: "...",
+     photo:       "data:image/jpeg;base64,...",
+     createdAt:   "ISO-дата"
+   }
+
+   ObjectStore "diary":
+   {
+     id:          "uuid",
+     date:        "2024-01-15",
+     equipmentId: "uuid",
+     sets: [
+       { weight: 80, reps: 10 },
+       { weight: 85, reps: 8  }
+     ],
+     notes:       "...",
+     createdAt:   "ISO-дата"
+   }
    ============================================================ */
 
 'use strict';
@@ -28,12 +50,8 @@ function generateId() {
 function formatDate(dateStr) {
   if (!dateStr) return '';
   const [y, m, d] = dateStr.split('-');
-  const date = new Date(y, m - 1, d);
-  return date.toLocaleDateString('ru-RU', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric'
+  return new Date(y, m - 1, d).toLocaleDateString('ru-RU', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
   });
 }
 
@@ -45,36 +63,34 @@ function getTodayString() {
   return `${y}-${m}-${d}`;
 }
 
+function escapeHtml(str) {
+  if (!str) return '';
+  return str
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/** Форматирование большого числа: 1 234 567 */
+function formatNumber(num) {
+  if (num === null || num === undefined) return '0';
+  return Math.round(num).toLocaleString('ru-RU');
+}
+
+/** Toast-уведомление */
 function showToast(message, type = 'info', duration = 3000) {
   const container = document.getElementById('toastContainer');
   const icons = { success: '✅', error: '❌', info: 'ℹ️' };
+
   const toast = document.createElement('div');
   toast.className = `toast toast--${type}`;
-  toast.innerHTML = `<span>${icons[type] || ''}</span><span>${message}</span>`;
+  toast.innerHTML = `<span>${icons[type] || ''}</span><span>${escapeHtml(message)}</span>`;
   container.appendChild(toast);
+
   setTimeout(() => {
     toast.style.animation = 'toastOut 0.3s ease forwards';
     setTimeout(() => toast.remove(), 300);
   }, duration);
-}
-
-function escapeHtml(str) {
-  if (!str) return '';
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-/**
- * Форматирование большого числа для отображения в статистике.
- * Например: 1500 → "1 500", 1200000 → "1 200 000"
- */
-function formatStatNumber(num) {
-  if (num === null || num === undefined) return '0';
-  return Math.round(num).toLocaleString('ru-RU');
 }
 
 // ============================================================
@@ -87,121 +103,100 @@ const DB = (() => {
     return new Promise((resolve, reject) => {
       if (db) { resolve(db); return; }
 
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
 
-      request.onupgradeneeded = (event) => {
-        const database = event.target.result;
+      req.onupgradeneeded = (e) => {
+        const database = e.target.result;
 
         if (!database.objectStoreNames.contains(STORE_EQ)) {
-          const eqStore = database.createObjectStore(STORE_EQ, { keyPath: 'id' });
-          eqStore.createIndex('createdAt', 'createdAt', { unique: false });
+          const s = database.createObjectStore(STORE_EQ, { keyPath: 'id' });
+          s.createIndex('createdAt', 'createdAt', { unique: false });
         }
 
         if (!database.objectStoreNames.contains(STORE_DI)) {
-          const diStore = database.createObjectStore(STORE_DI, { keyPath: 'id' });
-          diStore.createIndex('date', 'date', { unique: false });
-          diStore.createIndex('equipmentId', 'equipmentId', { unique: false });
+          const s = database.createObjectStore(STORE_DI, { keyPath: 'id' });
+          s.createIndex('date',        'date',        { unique: false });
+          s.createIndex('equipmentId', 'equipmentId', { unique: false });
         }
       };
 
-      request.onsuccess = (event) => {
-        db = event.target.result;
-        resolve(db);
-      };
-
-      request.onerror = (event) => {
-        console.error('[DB] Ошибка открытия:', event.target.error);
-        reject(event.target.error);
-      };
+      req.onsuccess = (e) => { db = e.target.result; resolve(db); };
+      req.onerror   = (e) => reject(e.target.error);
     });
   }
 
-  function transaction(storeName, mode = 'readonly') {
-    return db.transaction(storeName, mode).objectStore(storeName);
+  function store(name, mode = 'readonly') {
+    return db.transaction(name, mode).objectStore(name);
   }
 
-  function promisify(request) {
-    return new Promise((resolve, reject) => {
-      request.onsuccess = () => resolve(request.result);
-      request.onerror  = () => reject(request.error);
+  function wrap(req) {
+    return new Promise((res, rej) => {
+      req.onsuccess = () => res(req.result);
+      req.onerror   = () => rej(req.error);
     });
   }
 
-  // --- CRUD: Тренажеры ---
+  // ---- Equipment CRUD ----
 
   async function getAllEquipment() {
     await open();
-    const store = transaction(STORE_EQ, 'readonly');
-    const items = await promisify(store.getAll());
+    const items = await wrap(store(STORE_EQ).getAll());
     return items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
 
   async function getEquipmentById(id) {
     await open();
-    return promisify(transaction(STORE_EQ, 'readonly').get(id));
+    return wrap(store(STORE_EQ).get(id));
   }
 
   async function saveEquipment(item) {
     await open();
-    return promisify(transaction(STORE_EQ, 'readwrite').put(item));
+    return wrap(store(STORE_EQ, 'readwrite').put(item));
   }
 
   async function deleteEquipment(id) {
     await open();
-    await promisify(transaction(STORE_EQ, 'readwrite').delete(id));
+    await wrap(store(STORE_EQ, 'readwrite').delete(id));
 
     // Каскадное удаление записей дневника
-    const allDiary = await getAllDiaryEntries();
-    for (const entry of allDiary.filter(e => e.equipmentId === id)) {
-      await promisify(
-        db.transaction(STORE_DI, 'readwrite').objectStore(STORE_DI).delete(entry.id)
-      );
+    const all = await wrap(store(STORE_DI).getAll());
+    for (const entry of all.filter(e => e.equipmentId === id)) {
+      await wrap(store(STORE_DI, 'readwrite').delete(entry.id));
     }
   }
 
-  // --- CRUD: Дневник ---
+  // ---- Diary CRUD ----
+
+  async function getAllDiary() {
+    await open();
+    return wrap(store(STORE_DI).getAll());
+  }
 
   async function getDiaryByDate(date) {
     await open();
-    const store = transaction(STORE_DI, 'readonly');
-    const items = await promisify(store.index('date').getAll(date));
+    const idx   = store(STORE_DI).index('date');
+    const items = await wrap(idx.getAll(date));
     return items.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
   }
 
   async function getDiaryEntryById(id) {
     await open();
-    return promisify(transaction(STORE_DI, 'readonly').get(id));
-  }
-
-  /**
-   * [NEW] Получение ВСЕХ записей дневника — нужно для подсчёта статистики.
-   * Используется только в StatsModule, не влияет на остальную логику.
-   */
-  async function getAllDiaryEntries() {
-    await open();
-    return promisify(transaction(STORE_DI, 'readonly').getAll());
+    return wrap(store(STORE_DI).get(id));
   }
 
   async function saveDiaryEntry(entry) {
     await open();
-    return promisify(transaction(STORE_DI, 'readwrite').put(entry));
+    return wrap(store(STORE_DI, 'readwrite').put(entry));
   }
 
   async function deleteDiaryEntry(id) {
     await open();
-    return promisify(transaction(STORE_DI, 'readwrite').delete(id));
+    return wrap(store(STORE_DI, 'readwrite').delete(id));
   }
 
   return {
-    getAllEquipment,
-    getEquipmentById,
-    saveEquipment,
-    deleteEquipment,
-    getDiaryByDate,
-    getDiaryEntryById,
-    getAllDiaryEntries,   // [NEW]
-    saveDiaryEntry,
-    deleteDiaryEntry
+    getAllEquipment, getEquipmentById, saveEquipment, deleteEquipment,
+    getAllDiary, getDiaryByDate, getDiaryEntryById, saveDiaryEntry, deleteDiaryEntry
   };
 })();
 
@@ -219,147 +214,104 @@ const AppState = {
 };
 
 // ============================================================
-// [NEW] МОДУЛЬ СТАТИСТИКИ
+// МОДУЛЬ СТАТИСТИКИ
+// Считает и отображает агрегированные данные по всему дневнику.
+// Вызывается после любого изменения записей дневника.
 // ============================================================
 const StatsModule = (() => {
 
-  // DOM-элементы
-  const loadingEl        = document.getElementById('statsLoading');
-  const gridEl           = document.getElementById('statsGrid');
-  const workoutsValueEl  = document.getElementById('statWorkoutsValue');
-  const weightValueEl    = document.getElementById('statWeightValue');
-  const exercisesValueEl = document.getElementById('statExercisesValue');
+  // DOM-элементы значений
+  const elWorkouts  = document.getElementById('statWorkoutsValue');
+  const elWeight    = document.getElementById('statWeightValue');
+  const elExercises = document.getElementById('statExercisesValue');
 
   /**
-   * Анимация изменения числа (плавный счётчик).
-   * @param {HTMLElement} el   - элемент для обновления
-   * @param {number}      from - начальное значение
-   * @param {number}      to   - конечное значение
-   * @param {number}      ms   - длительность анимации в мс
+   * Анимированное обновление числа в элементе.
+   * Добавляет CSS-класс .updating для визуального эффекта.
    */
-  function animateCounter(el, from, to, ms = 600) {
-    if (from === to) return;
-
-    const startTime = performance.now();
-    const diff = to - from;
-
-    function step(currentTime) {
-      const elapsed  = currentTime - startTime;
-      const progress = Math.min(elapsed / ms, 1);
-
-      // Функция плавности: easeOutCubic
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const current = Math.round(from + diff * eased);
-
-      el.textContent = formatStatNumber(current);
-
-      if (progress < 1) {
-        requestAnimationFrame(step);
-      } else {
-        el.textContent = formatStatNumber(to);
-        // Добавляем CSS-класс для "прыжка" числа при обновлении
-        el.closest('.stat-card__value')?.classList.add('updated');
-        setTimeout(() => {
-          el.closest('.stat-card__value')?.classList.remove('updated');
-        }, 400);
-      }
-    }
-
-    requestAnimationFrame(step);
+  function animateValue(el, newText) {
+    el.classList.add('updating');
+    setTimeout(() => {
+      el.textContent = newText;
+      el.classList.remove('updating');
+    }, 150);
   }
 
   /**
-   * Подсчёт статистики из всех записей дневника.
+   * Подсчёт статистики по всем записям дневника.
+   *
+   * @param {Array} allEntries — все записи из DB.getAllDiary()
+   * @returns {{ workouts: number, totalWeight: number, exercises: number }}
    *
    * Алгоритм:
-   * 1. Получаем все записи дневника из IndexedDB
-   * 2. Уникальные даты → количество тренировок
-   * 3. Сумма (вес * повторения) по всем подходам → суммарный вес
-   * 4. Количество записей (строк дневника) → количество упражнений
-   *
-   * @returns {Promise<{workouts: number, totalWeight: number, exercises: number}>}
+   * - workouts:    уникальные даты среди всех записей
+   * - totalWeight: Σ (weight × reps) по каждому подходу каждой записи
+   * - exercises:   общее количество записей (строк) в дневнике
    */
-  async function calculate() {
-    const allEntries = await DB.getAllDiaryEntries();
-
-    if (allEntries.length === 0) {
-      return { workouts: 0, totalWeight: 0, exercises: 0 };
-    }
-
-    // 1. Уникальные даты = количество дней с тренировками
+  function calculate(allEntries) {
+    // Уникальные даты → количество тренировочных дней
     const uniqueDates = new Set(allEntries.map(e => e.date));
     const workouts = uniqueDates.size;
 
-    // 2. Суммарный вес: Σ (вес × повторения) по каждому подходу
+    // Суммарный поднятый вес: weight × reps для каждого подхода
     let totalWeight = 0;
+    let exercises   = 0;
+
     allEntries.forEach(entry => {
+      exercises++; // каждая запись = одно упражнение
+
       if (Array.isArray(entry.sets)) {
         entry.sets.forEach(set => {
           const w = parseFloat(set.weight) || 0;
-          const r = parseInt(set.reps)    || 0;
+          const r = parseInt(set.reps)     || 0;
           totalWeight += w * r;
         });
       }
     });
 
-    // 3. Количество упражнений = общее число записей в дневнике
-    const exercises = allEntries.length;
-
     return { workouts, totalWeight, exercises };
   }
 
   /**
-   * Предыдущие значения для анимации счётчика.
-   * Хранятся между вызовами update().
-   */
-  const prevValues = {
-    workouts:    0,
-    totalWeight: 0,
-    exercises:   0
-  };
-
-  /**
-   * [ПУБЛИЧНЫЙ] Обновление блока статистики.
-   * Вызывается после любого изменения данных дневника.
-   *
-   * Точки вызова в коде:
-   * - EquipmentModule: после deleteEquipment (каскадное удаление)
-   * - DiaryModule: после saveDiaryEntry и deleteDiaryEntry
-   * - initApp: при первом запуске
+   * Публичный метод: загружает все записи из БД,
+   * считает статистику и обновляет DOM.
+   * Вызывается из DiaryModule после сохранения/удаления.
    */
   async function update() {
     try {
-      // Показываем скелетон при первой загрузке
-      if (gridEl.hidden) {
-        loadingEl.hidden = false;
-        gridEl.hidden    = true;
+      const allEntries = await DB.getAllDiary();
+      const stats = calculate(allEntries);
+
+      // Форматирование суммарного веса:
+      // до 1000 кг — показываем кг, свыше — тонны
+      let weightText;
+      if (stats.totalWeight >= 1000) {
+        weightText = (stats.totalWeight / 1000).toFixed(1).replace('.', ',') + ' т';
+      } else {
+        weightText = formatNumber(stats.totalWeight);
       }
 
-      const stats = await calculate();
-
-      // Анимируем изменение каждого показателя
-      animateCounter(workoutsValueEl,  prevValues.workouts,    stats.workouts,    700);
-      animateCounter(weightValueEl,    prevValues.totalWeight, stats.totalWeight, 900);
-      animateCounter(exercisesValueEl, prevValues.exercises,   stats.exercises,   700);
-
-      // Сохраняем для следующей анимации
-      prevValues.workouts    = stats.workouts;
-      prevValues.totalWeight = stats.totalWeight;
-      prevValues.exercises   = stats.exercises;
-
-      // Скрываем скелетон, показываем данные
-      loadingEl.hidden = true;
-      gridEl.hidden    = false;
+      animateValue(elWorkouts,  formatNumber(stats.workouts));
+      animateValue(elWeight,    weightText);
+      animateValue(elExercises, formatNumber(stats.exercises));
 
     } catch (err) {
-      console.error('[Stats] Ошибка подсчёта статистики:', err);
-      // При ошибке всё равно показываем блок с нулями
-      loadingEl.hidden = true;
-      gridEl.hidden    = false;
+      console.error('[Stats] Ошибка расчёта статистики:', err);
+      // При ошибке показываем прочерки
+      elWorkouts.textContent  = '—';
+      elWeight.textContent    = '—';
+      elExercises.textContent = '—';
     }
   }
 
-  return { update };
+  /**
+   * Инициализация: первичная загрузка статистики при старте.
+   */
+  function init() {
+    update();
+  }
+
+  return { init, update };
 })();
 
 // ============================================================
@@ -386,16 +338,10 @@ function initTabs() {
       btn.classList.add('active');
       btn.setAttribute('aria-selected', 'true');
 
-      const sectionId = targetTab === 'equipment' ? 'sectionEquipment' : 'sectionDiary';
-      const target = document.getElementById(sectionId);
+      const id = targetTab === 'equipment' ? 'sectionEquipment' : 'sectionDiary';
+      const target = document.getElementById(id);
       target.hidden = false;
       target.classList.add('active');
-
-      // При переключении на вкладку тренажеров — обновляем статистику
-      // (на случай если данные изменились в дневнике)
-      if (targetTab === 'equipment') {
-        StatsModule.update();
-      }
     });
   });
 }
@@ -405,19 +351,19 @@ function initTabs() {
 // ============================================================
 const EquipmentModule = (() => {
 
-  const modal            = document.getElementById('modalEquipment');
-  const form             = document.getElementById('formEquipment');
-  const modalTitle       = document.getElementById('modalEquipmentTitle');
-  const inputId          = document.getElementById('equipmentId');
-  const inputName        = document.getElementById('equipmentName');
-  const inputDesc        = document.getElementById('equipmentDesc');
-  const inputPhoto       = document.getElementById('equipmentPhoto');
-  const photoPreview     = document.getElementById('photoPreview');
+  const modal           = document.getElementById('modalEquipment');
+  const form            = document.getElementById('formEquipment');
+  const modalTitle      = document.getElementById('modalEquipmentTitle');
+  const inputId         = document.getElementById('equipmentId');
+  const inputName       = document.getElementById('equipmentName');
+  const inputDesc       = document.getElementById('equipmentDesc');
+  const inputPhoto      = document.getElementById('equipmentPhoto');
+  const photoPreview    = document.getElementById('photoPreview');
   const photoPlaceholder = document.getElementById('photoPlaceholder');
-  const btnRemovePhoto   = document.getElementById('btnRemovePhoto');
-  const listEl           = document.getElementById('equipmentList');
-  const emptyEl          = document.getElementById('emptyEquipment');
-  const errorName        = document.getElementById('errorEquipmentName');
+  const btnRemovePhoto  = document.getElementById('btnRemovePhoto');
+  const listEl          = document.getElementById('equipmentList');
+  const emptyEl         = document.getElementById('emptyEquipment');
+  const errorName       = document.getElementById('errorEquipmentName');
 
   function openAddModal() {
     AppState.editingEquipId = null;
@@ -437,12 +383,12 @@ const EquipmentModule = (() => {
     AppState.editingEquipId = id;
     AppState.photoBase64    = item.photo || null;
     modalTitle.textContent  = 'Редактировать тренажер';
+
     inputId.value   = item.id;
     inputName.value = item.name;
     inputDesc.value = item.description || '';
 
-    if (item.photo) showPhotoPreview(item.photo);
-    else resetPhotoUI();
+    item.photo ? showPhotoPreview(item.photo) : resetPhotoUI();
 
     clearErrors();
     modal.hidden = false;
@@ -480,12 +426,14 @@ const EquipmentModule = (() => {
   function validate() {
     let valid = true;
     clearErrors();
+
     if (!inputName.value.trim()) {
       errorName.textContent       = 'Введите название тренажера';
       inputName.style.borderColor = 'var(--color-danger)';
       inputName.focus();
       valid = false;
     }
+
     return valid;
   }
 
@@ -497,13 +445,15 @@ const EquipmentModule = (() => {
       showToast('Выберите файл изображения', 'error');
       return;
     }
+
     if (file.size > 5 * 1024 * 1024) {
       showToast('Файл слишком большой (максимум 5 МБ)', 'error');
       return;
     }
 
+    // FileReader API: читаем файл как base64 Data URL
     const reader = new FileReader();
-    reader.onload  = (e) => {
+    reader.onload = (e) => {
       AppState.photoBase64 = e.target.result;
       showPhotoPreview(e.target.result);
     };
@@ -515,8 +465,8 @@ const EquipmentModule = (() => {
     event.preventDefault();
     if (!validate()) return;
 
-    const existing = AppState.editingEquipId
-      ? await DB.getEquipmentById(AppState.editingEquipId)
+    const existingCreatedAt = AppState.editingEquipId
+      ? (await DB.getEquipmentById(AppState.editingEquipId))?.createdAt
       : null;
 
     const item = {
@@ -524,7 +474,7 @@ const EquipmentModule = (() => {
       name:        inputName.value.trim(),
       description: inputDesc.value.trim(),
       photo:       AppState.photoBase64 || null,
-      createdAt:   existing?.createdAt || new Date().toISOString()
+      createdAt:   existingCreatedAt || new Date().toISOString()
     };
 
     try {
@@ -552,13 +502,11 @@ const EquipmentModule = (() => {
           await DB.deleteEquipment(id);
           await loadAndRender();
 
+          // Обновляем дневник и статистику
           if (AppState.currentDate) {
             await DiaryModule.loadAndRender(AppState.currentDate);
           }
-
-          // [MOD] Обновляем статистику после удаления тренажера
-          // (каскадно удалились записи дневника → статистика изменилась)
-          await StatsModule.update();
+          await StatsModule.update(); // ← обновляем статистику
 
           showToast('Тренажер удалён', 'success');
         } catch (err) {
@@ -609,12 +557,8 @@ const EquipmentModule = (() => {
         </div>
       </div>
       <div class="equipment-card__actions">
-        <button class="btn btn-secondary btn-sm btn-edit" data-id="${item.id}">
-          ✏️ Изменить
-        </button>
-        <button class="btn btn-danger btn-sm btn-delete" data-id="${item.id}">
-          🗑 Удалить
-        </button>
+        <button class="btn btn-secondary btn-sm btn-edit" data-id="${item.id}">✏️ Изменить</button>
+        <button class="btn btn-danger btn-sm btn-delete" data-id="${item.id}">🗑 Удалить</button>
       </div>
     `;
 
@@ -634,6 +578,7 @@ const EquipmentModule = (() => {
 
     form.addEventListener('submit', handleSubmit);
     inputPhoto.addEventListener('change', handleFileSelect);
+
     btnRemovePhoto.addEventListener('click', () => {
       AppState.photoBase64 = null;
       resetPhotoUI();
@@ -668,32 +613,21 @@ const DiaryModule = (() => {
 
   let setsCount = 0;
 
-  // --- Управление подходами ---
+  // ---- Управление подходами ----
 
   function addSetRow(weight = '', reps = '') {
     setsCount++;
     const row = document.createElement('div');
     row.className = 'set-row';
-    row.dataset.setIndex = setsCount;
 
     row.innerHTML = `
       <span class="set-row__num">${setsCount}</span>
-      <input
-        type="number"
-        class="set-weight"
-        placeholder="Вес (кг)"
-        value="${weight}"
-        min="0" max="9999" step="0.5"
-        aria-label="Вес подхода ${setsCount}"
-      />
-      <input
-        type="number"
-        class="set-reps"
-        placeholder="Повторений"
-        value="${reps}"
-        min="1" max="9999" step="1"
-        aria-label="Повторений в подходе ${setsCount}"
-      />
+      <input type="number" class="set-weight" placeholder="Вес (кг)"
+             value="${weight}" min="0" max="9999" step="0.5"
+             aria-label="Вес подхода ${setsCount}" />
+      <input type="number" class="set-reps" placeholder="Повторений"
+             value="${reps}" min="1" max="9999" step="1"
+             aria-label="Повторений в подходе ${setsCount}" />
       <button type="button" class="btn-icon btn-remove-set" aria-label="Удалить подход">✕</button>
     `;
 
@@ -715,11 +649,11 @@ const DiaryModule = (() => {
   function getSetsData() {
     return Array.from(setsList.querySelectorAll('.set-row')).map(row => ({
       weight: parseFloat(row.querySelector('.set-weight').value) || 0,
-      reps:   parseInt(row.querySelector('.set-reps').value)    || 0
+      reps:   parseInt(row.querySelector('.set-reps').value)     || 0
     }));
   }
 
-  // --- Модал ---
+  // ---- Модал ----
 
   function populateEquipmentSelect(selectedId = '') {
     selectEquip.innerHTML = '<option value="">— Выберите тренажер —</option>';
@@ -741,7 +675,7 @@ const DiaryModule = (() => {
     inputEntryDate.value = date;
     populateEquipmentSelect();
     clearErrors();
-    addSetRow(); addSetRow(); addSetRow();
+    addSetRow(); addSetRow(); addSetRow(); // 3 подхода по умолчанию
     modal.hidden = false;
     selectEquip.focus();
   }
@@ -752,9 +686,11 @@ const DiaryModule = (() => {
 
     AppState.editingDiaryId = id;
     modalTitle.textContent  = 'Редактировать запись';
+
     inputEntryId.value   = entry.id;
     inputEntryDate.value = entry.date;
     inputNotes.value     = entry.notes || '';
+
     populateEquipmentSelect(entry.equipmentId);
 
     setsList.innerHTML = '';
@@ -786,12 +722,14 @@ const DiaryModule = (() => {
   function validate() {
     let valid = true;
     clearErrors();
+
     if (!selectEquip.value) {
       errorEquip.textContent        = 'Выберите тренажер';
       selectEquip.style.borderColor = 'var(--color-danger)';
       selectEquip.focus();
       valid = false;
     }
+
     return valid;
   }
 
@@ -800,8 +738,9 @@ const DiaryModule = (() => {
     if (!validate()) return;
 
     const date = inputEntryDate.value || AppState.currentDate;
-    const existing = AppState.editingDiaryId
-      ? await DB.getDiaryEntryById(AppState.editingDiaryId)
+
+    const existingCreatedAt = AppState.editingDiaryId
+      ? (await DB.getDiaryEntryById(AppState.editingDiaryId))?.createdAt
       : null;
 
     const entry = {
@@ -810,14 +749,14 @@ const DiaryModule = (() => {
       equipmentId: selectEquip.value,
       sets:        getSetsData(),
       notes:       inputNotes.value.trim(),
-      createdAt:   existing?.createdAt || new Date().toISOString()
+      createdAt:   existingCreatedAt || new Date().toISOString()
     };
 
     try {
       await DB.saveDiaryEntry(entry);
       await loadAndRender(date);
 
-      // [MOD] Обновляем статистику после сохранения записи дневника
+      // ← КЛЮЧЕВОЙ МОМЕНТ: обновляем статистику после сохранения записи
       await StatsModule.update();
 
       closeModal();
@@ -834,16 +773,15 @@ const DiaryModule = (() => {
   async function handleDelete(id) {
     const entry = AppState.diaryEntries.find(e => e.id === id);
     const equip = AppState.equipment.find(e => e.id === entry?.equipmentId);
-    const name  = equip?.name || 'запись';
 
     ConfirmModal.show(
-      `Удалить запись «${name}» из дневника?`,
+      `Удалить запись «${equip?.name || 'упражнение'}» из дневника?`,
       async () => {
         try {
           await DB.deleteDiaryEntry(id);
           await loadAndRender(AppState.currentDate);
 
-          // [MOD] Обновляем статистику после удаления записи дневника
+          // ← обновляем статистику после удаления записи
           await StatsModule.update();
 
           showToast('Запись удалена', 'success');
@@ -869,9 +807,9 @@ const DiaryModule = (() => {
   }
 
   function renderEntries() {
-    entryList.innerHTML  = '';
-    diaryHint.hidden     = true;
-    dayHeader.hidden     = false;
+    entryList.innerHTML = '';
+    diaryHint.hidden    = true;
+    dayHeader.hidden    = false;
     dayTitle.textContent = formatDate(AppState.currentDate);
 
     if (AppState.diaryEntries.length === 0) {
@@ -894,6 +832,7 @@ const DiaryModule = (() => {
       ? `<img class="diary-entry-card__thumb" src="${equip.photo}" alt="${escapeHtml(equip.name)}" loading="lazy" />`
       : `<div class="diary-entry-card__thumb-placeholder">🏋️</div>`;
 
+    // Таблица подходов
     let setsHtml = '';
     if (entry.sets?.length > 0) {
       const rows = entry.sets.map((s, i) => `
@@ -903,6 +842,7 @@ const DiaryModule = (() => {
           <td>${s.reps > 0 ? `${s.reps} повт.` : '—'}</td>
         </tr>
       `).join('');
+
       setsHtml = `
         <table class="sets-table">
           <thead>
@@ -912,7 +852,7 @@ const DiaryModule = (() => {
         </table>
       `;
     } else {
-      setsHtml = '<p style="color:var(--color-text-muted);font-size:.85rem">Подходы не указаны</p>';
+      setsHtml = `<p style="color:var(--color-text-muted);font-size:.85rem">Подходы не указаны</p>`;
     }
 
     const notesHtml = entry.notes
@@ -1016,22 +956,21 @@ function registerServiceWorker() {
       navigator.serviceWorker
         .register('/sw.js')
         .then(reg => console.log('[SW] Зарегистрирован:', reg.scope))
-        .catch(err => console.warn('[SW] Ошибка регистрации:', err));
+        .catch(err => console.warn('[SW] Ошибка:', err));
     });
   }
 }
 
 // ============================================================
-// ОТСЛЕЖИВАНИЕ СТАТУСА СЕТИ
+// СТАТУС СЕТИ
 // ============================================================
 function initNetworkStatus() {
-  const statusEl = document.getElementById('pwaStatus');
+  const el = document.getElementById('pwaStatus');
 
   function update() {
-    const online = navigator.onLine;
-    statusEl.textContent = online ? '🟢' : '🔴';
-    statusEl.title       = online ? 'Онлайн' : 'Офлайн';
-    if (!online) showToast('Нет подключения. Работаем офлайн.', 'info');
+    el.textContent = navigator.onLine ? '🟢' : '🔴';
+    el.title       = navigator.onLine ? 'Онлайн' : 'Офлайн';
+    if (!navigator.onLine) showToast('Нет подключения. Работаем офлайн.', 'info');
   }
 
   window.addEventListener('online',  update);
@@ -1048,15 +987,15 @@ async function initApp() {
     ConfirmModal.init();
     EquipmentModule.init();
     DiaryModule.init();
-    registerServiceWorker();
-    initNetworkStatus();
 
     // Загружаем дневник за сегодня
-    const today = getTodayString();
-    await DiaryModule.loadAndRender(today);
+    await DiaryModule.loadAndRender(getTodayString());
 
-    // [NEW] Первичная загрузка статистики
-    await StatsModule.update();
+    // Инициализируем статистику (загружает данные из БД)
+    StatsModule.init();
+
+    registerServiceWorker();
+    initNetworkStatus();
 
     console.log('[App] Gym Tracker запущен ✅');
   } catch (err) {
