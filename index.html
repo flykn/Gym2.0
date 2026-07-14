@@ -3,15 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#e94560" />
+  <meta name="theme-color" content="#ff6b2b" />
   <meta name="description" content="PWA приложение для отслеживания тренировок" />
 
-  <!-- PWA Manifest -->
   <link rel="manifest" href="manifest.json" />
-
-  <!-- Apple PWA мета-теги -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="GymApp" />
 
   <title>Gym Tracker</title>
@@ -62,7 +59,64 @@
       role="tabpanel"
       aria-labelledby="tabEquipment"
     >
-      <!-- Кнопка добавления -->
+
+      <!-- ====================================================
+           БЛОК СТАТИСТИКИ
+           Размещается ВЫШЕ заголовка секции и списка тренажеров.
+           Данные обновляются через StatsModule.update()
+           ==================================================== -->
+      <div class="stats-block" id="statsBlock">
+
+        <!-- Скелетон-лоадер показывается до загрузки данных -->
+        <div class="stats-loading" id="statsLoading">
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+        </div>
+
+        <!-- Сами карточки статистики -->
+        <div class="stats-grid" id="statsGrid" hidden>
+
+          <!-- Карточка 1: Количество тренировок -->
+          <div class="stat-card" id="statWorkouts">
+            <div class="stat-card__icon">🗓️</div>
+            <div class="stat-card__body">
+              <div class="stat-card__value" id="statWorkoutsValue">0</div>
+              <div class="stat-card__label">Тренировок</div>
+            </div>
+            <!-- Декоративная полоска акцентного цвета -->
+            <div class="stat-card__accent"></div>
+          </div>
+
+          <!-- Карточка 2: Суммарный вес -->
+          <div class="stat-card" id="statWeight">
+            <div class="stat-card__icon">⚖️</div>
+            <div class="stat-card__body">
+              <!-- Значение разбито на число и единицу измерения -->
+              <div class="stat-card__value">
+                <span id="statWeightValue">0</span>
+                <span class="stat-card__unit">кг</span>
+              </div>
+              <div class="stat-card__label">Суммарный вес</div>
+            </div>
+            <div class="stat-card__accent"></div>
+          </div>
+
+          <!-- Карточка 3: Количество упражнений -->
+          <div class="stat-card" id="statExercises">
+            <div class="stat-card__icon">🔥</div>
+            <div class="stat-card__body">
+              <div class="stat-card__value" id="statExercisesValue">0</div>
+              <div class="stat-card__label">Упражнений</div>
+            </div>
+            <div class="stat-card__accent"></div>
+          </div>
+
+        </div>
+      </div>
+      <!-- /stats-block -->
+
+      <!-- Заголовок секции тренажеров -->
       <div class="section-header">
         <h2>Тренажеры</h2>
         <button class="btn btn-primary" id="btnAddEquipment">
@@ -79,10 +133,8 @@
           </div>
 
           <form id="formEquipment" class="modal-form" novalidate>
-            <!-- Скрытое поле для ID при редактировании -->
             <input type="hidden" id="equipmentId" />
 
-            <!-- Название -->
             <div class="form-group">
               <label for="equipmentName">Название *</label>
               <input
@@ -95,7 +147,6 @@
               <span class="field-error" id="errorEquipmentName"></span>
             </div>
 
-            <!-- Описание -->
             <div class="form-group">
               <label for="equipmentDesc">Описание</label>
               <textarea
@@ -106,10 +157,6 @@
               ></textarea>
             </div>
 
-            <!-- Фото тренажера -->
-            <!-- Реализация: input type="file" с accept="image/*"
-                 При выборе файл читается через FileReader API
-                 и сохраняется как base64-строка в IndexedDB -->
             <div class="form-group">
               <label for="equipmentPhoto">Фото тренажера</label>
               <div class="photo-upload-area" id="photoUploadArea">
@@ -132,7 +179,6 @@
                   aria-label="Загрузить фото тренажера"
                 />
               </div>
-              <!-- Кнопка удаления фото -->
               <button
                 type="button"
                 class="btn btn-danger btn-sm"
@@ -143,7 +189,6 @@
               </button>
             </div>
 
-            <!-- Кнопки формы -->
             <div class="form-actions">
               <button type="button" class="btn btn-secondary" id="btnCancelEquipment">
                 Отмена
@@ -157,9 +202,7 @@
       </div>
 
       <!-- Список тренажеров -->
-      <div id="equipmentList" class="equipment-grid">
-        <!-- Карточки генерируются через JS -->
-      </div>
+      <div id="equipmentList" class="equipment-grid"></div>
 
       <!-- Заглушка при пустом списке -->
       <div class="empty-state" id="emptyEquipment" hidden>
@@ -183,7 +226,6 @@
         <h2>Дневник тренировок</h2>
       </div>
 
-      <!-- Выбор даты -->
       <div class="date-picker-wrapper">
         <label for="diaryDate" class="date-label">📅 Выберите дату:</label>
         <input
@@ -194,7 +236,6 @@
         />
       </div>
 
-      <!-- Информация о выбранной дате -->
       <div class="diary-day-header" id="diaryDayHeader" hidden>
         <h3 id="diaryDayTitle"></h3>
         <button class="btn btn-primary btn-sm" id="btnAddDiaryEntry">
@@ -202,18 +243,13 @@
         </button>
       </div>
 
-      <!-- Список записей за выбранную дату -->
-      <div id="diaryEntryList" class="diary-list">
-        <!-- Карточки записей генерируются через JS -->
-      </div>
+      <div id="diaryEntryList" class="diary-list"></div>
 
-      <!-- Заглушка при пустом дневнике за дату -->
       <div class="empty-state" id="emptyDiary" hidden>
         <span class="empty-icon">📝</span>
         <p>Нет записей за этот день</p>
       </div>
 
-      <!-- Подсказка до выбора даты -->
       <div class="empty-state" id="diaryHint">
         <span class="empty-icon">📅</span>
         <p>Выберите дату, чтобы просмотреть или добавить тренировку</p>
@@ -234,28 +270,22 @@
         <input type="hidden" id="diaryEntryId" />
         <input type="hidden" id="diaryEntryDate" />
 
-        <!-- Выбор тренажера -->
         <div class="form-group">
           <label for="diaryEquipmentSelect">Тренажер *</label>
           <select id="diaryEquipmentSelect" required>
             <option value="">— Выберите тренажер —</option>
-            <!-- Опции генерируются через JS -->
           </select>
           <span class="field-error" id="errorDiaryEquipment"></span>
         </div>
 
-        <!-- Подходы (динамический список) -->
         <div class="form-group">
           <label>Подходы *</label>
-          <div id="setsList" class="sets-list">
-            <!-- Строки подходов генерируются через JS -->
-          </div>
+          <div id="setsList" class="sets-list"></div>
           <button type="button" class="btn btn-secondary btn-sm" id="btnAddSet">
             + Добавить подход
           </button>
         </div>
 
-        <!-- Заметки -->
         <div class="form-group">
           <label for="diaryNotes">Заметки</label>
           <textarea
